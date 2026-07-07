@@ -125,6 +125,7 @@
       <div class="row">
         <input id="fileInput" type="file" accept=".csv,.xlsx,.xls" />
         <button id="generateBtn" class="btn" disabled>Genereer PDF</button>
+        <button id="generateZipBtn" class="btn" disabled>Download alles apart (ZIP)</button>
       </div>
       <div class="row" style="margin-top: 10px;">
         <label>
@@ -144,6 +145,33 @@
         <div class="summary-item"><strong>Ongeldig:</strong> <span id="invalidCount">0</span></div>
       </div>
       <p id="status" class="hint"></p>
+    </div>
+
+    <div class="card" id="manualEntryCard">
+      <h3>Handmatig regels invoeren</h3>
+      <p class="hint">Deze regels worden samengevoegd met de regels uit het geüploade bestand (indien aanwezig).</p>
+
+      <label for="bulkPasteInput" style="display:block; margin-bottom:6px; font-weight:600;">Meerdere regels in 1x plakken</label>
+      <textarea id="bulkPasteInput" rows="6" style="width:100%; box-sizing:border-box; font-family:inherit; font-size:14px; padding:8px; border:1px solid #d9deea; border-radius:8px;" placeholder="Plak hier meerdere regels, bij voorkeur inclusief kopregel (bijv. rechtstreeks vanuit Excel of een productoverzicht).&#10;De tool herkent zelf de kolommen EAN, Naam/Productnaam, Kleur en Maat — kolomvolgorde maakt niet uit en extra kolommen (zoals Interne referentie, Productgroep, Beschrijving) worden genegeerd.&#10;Geen kopregel? Dan wordt de volgorde EAN, Naam, Kleur, Maat aangenomen."></textarea>
+      <div class="row" style="margin-top: 8px; margin-bottom: 4px;">
+        <button id="bulkAddBtn" class="btn" type="button">Toevoegen aan lijst</button>
+      </div>
+
+      <table id="manualTable">
+        <thead>
+          <tr>
+            <th>EAN</th>
+            <th>Naam</th>
+            <th>Kleur</th>
+            <th>Maat</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="manualTbody"></tbody>
+      </table>
+      <div class="row" style="margin-top: 10px;">
+        <button id="addManualRowBtn" class="btn" type="button">+ Rij toevoegen</button>
+      </div>
     </div>
 
     <div class="card" id="previewCard" hidden>
@@ -179,14 +207,18 @@
   <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script>
     const state = {
+      fileRows: [],
+      manualRows: [],
       validRows: [],
       errors: []
     };
 
     const fileInput = document.getElementById('fileInput');
     const generateBtn = document.getElementById('generateBtn');
+    const generateZipBtn = document.getElementById('generateZipBtn');
     const statusEl = document.getElementById('status');
     const summaryEl = document.getElementById('summary');
     const totalCountEl = document.getElementById('totalCount');
@@ -198,42 +230,259 @@
     const errorsTbody = document.querySelector('#errorsTable tbody');
     const labelWidthInput = document.getElementById('labelWidthInput');
     const labelHeightInput = document.getElementById('labelHeightInput');
+    const manualTbody = document.getElementById('manualTbody');
+    const addManualRowBtn = document.getElementById('addManualRowBtn');
+    const bulkPasteInput = document.getElementById('bulkPasteInput');
+    const bulkAddBtn = document.getElementById('bulkAddBtn');
 
     fileInput.addEventListener('change', handleFileSelect);
     generateBtn.addEventListener('click', handleGeneratePdf);
+    generateZipBtn.addEventListener('click', handleGenerateZip);
+    addManualRowBtn.addEventListener('click', handleAddManualRow);
+    manualTbody.addEventListener('input', handleManualInput);
+    manualTbody.addEventListener('click', handleManualRemoveClick);
+    bulkAddBtn.addEventListener('click', handleBulkAdd);
+
+    revalidateAll();
 
     async function handleFileSelect() {
       const file = fileInput.files[0];
-      resetUI();
+      state.fileRows = [];
+      statusEl.textContent = '';
+      statusEl.className = 'hint';
 
       if (!file) {
+        revalidateAll();
         return;
       }
 
       try {
-        const rows = await parseInputFile(file);
-        const result = validateAndNormalizeRows(rows);
-        state.validRows = result.validRows;
-        state.errors = result.errors;
-
-        renderSummary(rows.length, state.validRows.length, state.errors.length);
-        renderPreview(state.validRows);
-        renderErrors(state.errors);
+        state.fileRows = await parseInputFile(file);
+        revalidateAll();
 
         if (state.validRows.length > 0) {
-          generateBtn.disabled = false;
           statusEl.className = 'success';
           statusEl.textContent = `Bestand geladen. ${state.validRows.length} labels klaar om te exporteren.`;
         } else {
-          generateBtn.disabled = true;
           statusEl.className = 'error';
           statusEl.textContent = 'Geen geldige regels gevonden. Corrigeer de fouten en upload opnieuw.';
         }
       } catch (error) {
-        generateBtn.disabled = true;
+        state.fileRows = [];
+        revalidateAll();
         statusEl.className = 'error';
         statusEl.textContent = `Bestand kon niet worden verwerkt: ${error.message}`;
       }
+    }
+
+    function handleAddManualRow() {
+      state.manualRows.push({ ean: '', naam: '', kleur: '', maat: '' });
+      renderManualTable();
+      revalidateAll();
+    }
+
+    function handleManualInput(event) {
+      const input = event.target;
+      if (!input.classList.contains('manual-input')) {
+        return;
+      }
+      const tr = input.closest('tr');
+      const index = Number(tr.dataset.index);
+      const field = input.dataset.field;
+      state.manualRows[index][field] = input.value;
+      revalidateAll();
+    }
+
+    function handleManualRemoveClick(event) {
+      const btn = event.target.closest('.manual-remove-btn');
+      if (!btn) {
+        return;
+      }
+      const tr = btn.closest('tr');
+      const index = Number(tr.dataset.index);
+      state.manualRows.splice(index, 1);
+      renderManualTable();
+      revalidateAll();
+    }
+
+    function detectDelimiter(line) {
+      if (line.includes('\t')) return '\t';
+      if (line.includes(';')) return ';';
+      if (line.includes(',')) return ',';
+      return null;
+    }
+
+    function splitByDelimiter(line, delimiter) {
+      return delimiter ? line.split(delimiter) : [line];
+    }
+
+    function parseBulkPasteRows(text) {
+      const lines = text
+        .split(/\r\n|\r|\n/)
+        .map(line => line.trim())
+        .filter(line => line.length > 0);
+
+      if (!lines.length) {
+        return { rows: [], missing: [] };
+      }
+
+      const delimiter = detectDelimiter(lines[0]);
+      const splitLines = lines.map(line => splitByDelimiter(line, delimiter).map(cell => cell.trim()));
+      const firstCells = splitLines[0];
+
+      const matchedHeaders = findRequiredColumnKeys(firstCells);
+      const hasRecognizedHeader = Boolean(
+        matchedHeaders.ean || matchedHeaders.naam || matchedHeaders.kleur || matchedHeaders.maat
+      );
+
+      let indices;
+      let dataLines;
+
+      if (hasRecognizedHeader) {
+        indices = {
+          ean: matchedHeaders.ean !== null ? firstCells.indexOf(matchedHeaders.ean) : -1,
+          naam: matchedHeaders.naam !== null ? firstCells.indexOf(matchedHeaders.naam) : -1,
+          kleur: matchedHeaders.kleur !== null ? firstCells.indexOf(matchedHeaders.kleur) : -1,
+          maat: matchedHeaders.maat !== null ? firstCells.indexOf(matchedHeaders.maat) : -1
+        };
+        dataLines = splitLines.slice(1);
+
+        const missing = [];
+        if (indices.ean === -1) missing.push('EAN');
+        if (indices.naam === -1) missing.push('Naam');
+        if (indices.kleur === -1) missing.push('Kleur');
+        if (indices.maat === -1) missing.push('Maat');
+        if (missing.length) {
+          return { rows: [], missing };
+        }
+      } else {
+        indices = { ean: 0, naam: 1, kleur: 2, maat: 3 };
+        dataLines = splitLines;
+      }
+
+      const rows = dataLines.map(cells => ({
+        ean: cells[indices.ean] ?? '',
+        naam: cells[indices.naam] ?? '',
+        kleur: cells[indices.kleur] ?? '',
+        maat: cells[indices.maat] ?? ''
+      }));
+
+      return { rows, missing: [] };
+    }
+
+    function handleBulkAdd() {
+      const { rows, missing } = parseBulkPasteRows(bulkPasteInput.value);
+
+      if (missing.length) {
+        statusEl.className = 'error';
+        statusEl.textContent = `Ontbrekende kolom(men) in geplakte tekst: ${missing.join(', ')}`;
+        return;
+      }
+
+      if (!rows.length) {
+        return;
+      }
+
+      state.manualRows.push(...rows);
+      renderManualTable();
+      revalidateAll();
+
+      bulkPasteInput.value = '';
+      statusEl.className = 'success';
+      statusEl.textContent = `${rows.length} regel(s) toegevoegd aan de handmatige lijst.`;
+    }
+
+    function renderManualTable() {
+      manualTbody.innerHTML = '';
+
+      state.manualRows.forEach((row, index) => {
+        const tr = document.createElement('tr');
+        tr.dataset.index = String(index);
+        tr.innerHTML = `
+          <td><input type="text" class="manual-input" data-field="ean" value="${escapeHtml(row.ean)}" style="width:100%"></td>
+          <td><input type="text" class="manual-input" data-field="naam" value="${escapeHtml(row.naam)}" style="width:100%"></td>
+          <td><input type="text" class="manual-input" data-field="kleur" value="${escapeHtml(row.kleur)}" style="width:100%"></td>
+          <td><input type="text" class="manual-input" data-field="maat" value="${escapeHtml(row.maat)}" style="width:100%"></td>
+          <td><button type="button" class="btn manual-remove-btn" style="background:#b00020;">&times;</button></td>
+        `;
+        manualTbody.appendChild(tr);
+      });
+    }
+
+    function revalidateAll() {
+      const fileResult = validateAndNormalizeFileRows(state.fileRows);
+      const manualResult = validateManualRows(state.manualRows);
+
+      state.validRows = fileResult.validRows.concat(manualResult.validRows);
+      state.errors = fileResult.errors.concat(manualResult.errors);
+
+      const totalRows = state.fileRows.length + countNonBlankManualRows(state.manualRows);
+
+      renderSummary(totalRows, state.validRows.length, state.errors.length);
+      renderPreview(state.validRows);
+      renderErrors(state.errors);
+
+      const hasValid = state.validRows.length > 0;
+      generateBtn.disabled = !hasValid;
+      generateZipBtn.disabled = !hasValid;
+    }
+
+    function computeLabelLayout(labelConfig) {
+      const { widthMm, heightMm } = labelConfig;
+      const marginX = Math.max(1.2, widthMm * 0.04);
+      const contentW = widthMm - marginX * 2;
+      const topPadding = Math.max(1.6, heightMm * 0.06);
+      const headerMaxWidth = Math.max(10, contentW);
+      const headerFontSize = clamp(heightMm * 0.26, 5.5, 8);
+      const eanFontSize = clamp(heightMm * 0.32, 8, 12);
+      const headerBlockHeight = Math.max(4.6, heightMm * 0.24);
+      const eanTextHeight = Math.max(3.8, heightMm * 0.17);
+      const barcodeY = topPadding + headerBlockHeight;
+      const barcodeH = Math.max(6, heightMm - barcodeY - eanTextHeight - 1.2);
+
+      return {
+        widthMm, heightMm, marginX, contentW, topPadding, headerMaxWidth,
+        headerFontSize, eanFontSize, barcodeY, barcodeH
+      };
+    }
+
+    function drawLabelPage(doc, row, layout) {
+      const title = `${row.naam} / ${row.kleur} / ${row.maat}`;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(layout.headerFontSize);
+
+      const titleLines = doc.splitTextToSize(title, layout.headerMaxWidth);
+      doc.text(titleLines, layout.marginX, layout.topPadding, { baseline: 'top' });
+
+      const canvas = document.createElement('canvas');
+      JsBarcode(canvas, row.ean, {
+        format: 'EAN13',
+        displayValue: false,
+        text: row.ean,
+        font: 'Arial',
+        fontSize: 16,
+        margin: 0,
+        background: '#ffffff',
+        lineColor: '#000000',
+        width: 2,
+        height: 42
+      });
+
+      const barcodeDataUrl = canvas.toDataURL('image/png');
+      doc.addImage(barcodeDataUrl, 'PNG', layout.marginX, layout.barcodeY, layout.contentW, layout.barcodeH, undefined, 'FAST');
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(layout.eanFontSize);
+      doc.text(row.ean, layout.widthMm / 2, layout.heightMm - 1.5, { align: 'center' });
+    }
+
+    function buildLabelPdfForRow(row, labelConfig) {
+      const layout = computeLabelLayout(labelConfig);
+      const orientation = layout.widthMm >= layout.heightMm ? 'landscape' : 'portrait';
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ orientation, unit: 'mm', format: [layout.widthMm, layout.heightMm] });
+      drawLabelPage(doc, row, layout);
+      return doc;
     }
 
     function handleGeneratePdf() {
@@ -250,64 +499,108 @@
         return;
       }
 
-      const { widthMm, heightMm } = labelConfig;
-      const orientation = widthMm >= heightMm ? 'landscape' : 'portrait';
-
-      const marginX = Math.max(1.2, widthMm * 0.04);
-      const contentW = widthMm - marginX * 2;
-      const topPadding = Math.max(1.6, heightMm * 0.06);
-      const headerMaxWidth = Math.max(10, contentW);
-      const headerFontSize = clamp(heightMm * 0.26, 5.5, 8);
-      const eanFontSize = clamp(heightMm * 0.32, 8, 12);
-      const headerBlockHeight = Math.max(4.6, heightMm * 0.24);
-      const eanTextHeight = Math.max(3.8, heightMm * 0.17);
-      const barcodeY = topPadding + headerBlockHeight;
-      const barcodeH = Math.max(6, heightMm - barcodeY - eanTextHeight - 1.2);
+      const layout = computeLabelLayout(labelConfig);
+      const orientation = layout.widthMm >= layout.heightMm ? 'landscape' : 'portrait';
 
       const { jsPDF } = window.jspdf;
       const doc = new jsPDF({
         orientation,
         unit: 'mm',
-        format: [widthMm, heightMm]
+        format: [layout.widthMm, layout.heightMm]
       });
 
       state.validRows.forEach((row, index) => {
         if (index > 0) {
-          doc.addPage([widthMm, heightMm], orientation);
+          doc.addPage([layout.widthMm, layout.heightMm], orientation);
         }
-
-        const title = `${row.naam} / ${row.kleur} / ${row.maat}`;
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(headerFontSize);
-
-        const titleLines = doc.splitTextToSize(title, headerMaxWidth);
-        doc.text(titleLines, marginX, topPadding, { baseline: 'top' });
-
-        const canvas = document.createElement('canvas');
-        JsBarcode(canvas, row.ean, {
-          format: 'EAN13',
-          displayValue: false,
-          text: row.ean,
-          font: 'Arial',
-          fontSize: 16,
-          margin: 0,
-          background: '#ffffff',
-          lineColor: '#000000',
-          width: 2,
-          height: 42
-        });
-
-        const barcodeDataUrl = canvas.toDataURL('image/png');
-        doc.addImage(barcodeDataUrl, 'PNG', marginX, barcodeY, contentW, barcodeH, undefined, 'FAST');
-
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(eanFontSize);
-        doc.text(row.ean, widthMm / 2, heightMm - 1.5, { align: 'center' });
+        drawLabelPage(doc, row, layout);
       });
 
       doc.save(`ean13-labels-${new Date().toISOString().slice(0, 10)}.pdf`);
       statusEl.className = 'success';
-      statusEl.textContent = `PDF gegenereerd op ${widthMm}mm x ${heightMm}mm.`;
+      statusEl.textContent = `PDF gegenereerd op ${layout.widthMm}mm x ${layout.heightMm}mm.`;
+    }
+
+    async function handleGenerateZip() {
+      if (!state.validRows.length) {
+        return;
+      }
+
+      let labelConfig;
+      try {
+        labelConfig = getLabelConfig();
+      } catch (error) {
+        statusEl.className = 'error';
+        statusEl.textContent = error.message;
+        return;
+      }
+
+      generateBtn.disabled = true;
+      generateZipBtn.disabled = true;
+
+      try {
+        const zip = new JSZip();
+        const usedNames = new Set();
+
+        for (let i = 0; i < state.validRows.length; i++) {
+          const row = state.validRows[i];
+          const doc = buildLabelPdfForRow(row, labelConfig);
+          const pdfArrayBuffer = doc.output('arraybuffer');
+          const filename = buildUniqueFilename(row, usedNames);
+          zip.file(filename, pdfArrayBuffer);
+
+          if (i % 25 === 0) {
+            statusEl.className = 'hint';
+            statusEl.textContent = `ZIP wordt gegenereerd... (${i + 1} / ${state.validRows.length})`;
+            await new Promise(resolve => setTimeout(resolve, 0));
+          }
+        }
+
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+
+        const url = URL.createObjectURL(zipBlob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `ean13-labels-${new Date().toISOString().slice(0, 10)}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+
+        statusEl.className = 'success';
+        statusEl.textContent = `ZIP gegenereerd met ${state.validRows.length} PDF's.`;
+      } catch (error) {
+        statusEl.className = 'error';
+        statusEl.textContent = `ZIP kon niet worden gegenereerd: ${error.message}`;
+      } finally {
+        generateBtn.disabled = state.validRows.length === 0;
+        generateZipBtn.disabled = state.validRows.length === 0;
+      }
+    }
+
+    function sanitizeFilenamePart(value) {
+      return String(value || '')
+        .trim()
+        .replace(/[\\/:*?"<>|]/g, '-')
+        .replace(/\s+/g, ' ')
+        .slice(0, 40);
+    }
+
+    function buildUniqueFilename(row, usedNames) {
+      const naam = sanitizeFilenamePart(row.naam) || 'onbekend';
+      const kleur = sanitizeFilenamePart(row.kleur) || 'onbekend';
+      const maat = sanitizeFilenamePart(row.maat) || 'onbekend';
+      const ean = sanitizeFilenamePart(row.ean) || 'geen-ean';
+
+      const base = `${naam}-${kleur}-${maat}-${ean}`.slice(0, 150);
+      let candidate = `${base}.pdf`;
+      let counter = 2;
+      while (usedNames.has(candidate.toLowerCase())) {
+        candidate = `${base} (${counter}).pdf`;
+        counter++;
+      }
+      usedNames.add(candidate.toLowerCase());
+      return candidate;
     }
 
     function getLabelConfig() {
@@ -340,29 +633,82 @@
       return Math.min(max, Math.max(min, value));
     }
 
-    function validateAndNormalizeRows(rows) {
+    function isBlankRow(ean, naam, kleur, maat) {
+      return !ean && !naam && !kleur && !maat;
+    }
+
+    function validateRawRow(eanRaw, naamRaw, kleurRaw, maatRaw, rowLabel) {
+      const eanTrimmed = String(eanRaw ?? '').trim();
+      const naam = String(naamRaw ?? '').trim();
+      const kleur = String(kleurRaw ?? '').trim();
+      const maat = String(maatRaw ?? '').trim();
+      const ean = eanTrimmed.replace(/\s+/g, '');
+
+      if (isBlankRow(ean, naam, kleur, maat)) {
+        return null;
+      }
+
+      if (!/^\d{13}$/.test(ean)) {
+        return { error: { row: rowLabel, error: `EAN '${eanTrimmed}' is geen 13-cijferige code.` } };
+      }
+
+      if (!isValidEan13(ean)) {
+        return { error: { row: rowLabel, error: `EAN '${ean}' heeft een onjuiste checkdigit.` } };
+      }
+
+      if (!naam) {
+        return { error: { row: rowLabel, error: 'Naam ontbreekt.' } };
+      }
+
+      if (!kleur) {
+        return { error: { row: rowLabel, error: 'Kleur ontbreekt.' } };
+      }
+
+      if (!maat) {
+        return { error: { row: rowLabel, error: 'Maat ontbreekt.' } };
+      }
+
+      return { row: { ean, naam, kleur, maat } };
+    }
+
+    const COLUMN_ALIASES = {
+      ean: ['ean', 'ean13', 'barcode', 'code'],
+      naam: ['naam', 'name', 'product', 'productnaam'],
+      kleur: ['kleur', 'color', 'colour'],
+      maat: ['maat', 'size', 'afmeting']
+    };
+
+    function findRequiredColumnKeys(headerKeys) {
+      return {
+        ean: findColumnKey(headerKeys, COLUMN_ALIASES.ean),
+        naam: findColumnKey(headerKeys, COLUMN_ALIASES.naam),
+        kleur: findColumnKey(headerKeys, COLUMN_ALIASES.kleur),
+        maat: findColumnKey(headerKeys, COLUMN_ALIASES.maat)
+      };
+    }
+
+    function missingColumnNames(requiredKeys) {
+      const missing = [];
+      if (!requiredKeys.ean) missing.push('EAN');
+      if (!requiredKeys.naam) missing.push('Naam');
+      if (!requiredKeys.kleur) missing.push('Kleur');
+      if (!requiredKeys.maat) missing.push('Maat');
+      return missing;
+    }
+
+    function validateAndNormalizeFileRows(rows) {
       const validRows = [];
       const errors = [];
 
-      const requiredKeys = { ean: null, naam: null, kleur: null, maat: null };
-
       if (!rows.length) {
-        return { validRows, errors: [{ row: '-', error: 'Leeg bestand.' }] };
+        return { validRows, errors };
       }
 
       const headerKeys = Object.keys(rows[0]);
-      requiredKeys.ean = findColumnKey(headerKeys, ['ean', 'ean13', 'barcode', 'code']);
-      requiredKeys.naam = findColumnKey(headerKeys, ['naam', 'name', 'product', 'productnaam']);
-      requiredKeys.kleur = findColumnKey(headerKeys, ['kleur', 'color', 'colour']);
-      requiredKeys.maat = findColumnKey(headerKeys, ['maat', 'size', 'afmeting']);
+      const requiredKeys = findRequiredColumnKeys(headerKeys);
+      const missing = missingColumnNames(requiredKeys);
 
-      if (!requiredKeys.ean || !requiredKeys.naam || !requiredKeys.kleur || !requiredKeys.maat) {
-        const missing = [];
-        if (!requiredKeys.ean) missing.push('EAN');
-        if (!requiredKeys.naam) missing.push('Naam');
-        if (!requiredKeys.kleur) missing.push('Kleur');
-        if (!requiredKeys.maat) missing.push('Maat');
-
+      if (missing.length) {
         return {
           validRows,
           errors: [{ row: '-', error: `Ontbrekende kolom(men): ${missing.join(', ')}` }]
@@ -370,46 +716,46 @@
       }
 
       rows.forEach((raw, index) => {
-        const rowNumber = index + 2;
-        const eanRaw = String(raw[requiredKeys.ean] ?? '').trim();
-        const naam = String(raw[requiredKeys.naam] ?? '').trim();
-        const kleur = String(raw[requiredKeys.kleur] ?? '').trim();
-        const maat = String(raw[requiredKeys.maat] ?? '').trim();
-        const ean = eanRaw.replace(/\s+/g, '');
+        const rowLabel = `Bestand rij ${index + 2}`;
+        const result = validateRawRow(
+          raw[requiredKeys.ean],
+          raw[requiredKeys.naam],
+          raw[requiredKeys.kleur],
+          raw[requiredKeys.maat],
+          rowLabel
+        );
 
-        if (!ean && !naam && !kleur && !maat) {
-          return;
-        }
-
-        if (!/^\d{13}$/.test(ean)) {
-          errors.push({ row: rowNumber, error: `EAN '${eanRaw}' is geen 13-cijferige code.` });
-          return;
-        }
-
-        if (!isValidEan13(ean)) {
-          errors.push({ row: rowNumber, error: `EAN '${ean}' heeft een onjuiste checkdigit.` });
-          return;
-        }
-
-        if (!naam) {
-          errors.push({ row: rowNumber, error: 'Naam ontbreekt.' });
-          return;
-        }
-
-        if (!kleur) {
-          errors.push({ row: rowNumber, error: 'Kleur ontbreekt.' });
-          return;
-        }
-
-        if (!maat) {
-          errors.push({ row: rowNumber, error: 'Maat ontbreekt.' });
-          return;
-        }
-
-        validRows.push({ ean, naam, kleur, maat });
+        if (!result) return;
+        if (result.error) { errors.push(result.error); return; }
+        validRows.push(result.row);
       });
 
       return { validRows, errors };
+    }
+
+    function validateManualRows(rows) {
+      const validRows = [];
+      const errors = [];
+
+      rows.forEach((raw, index) => {
+        const rowLabel = `Handmatig rij ${index + 1}`;
+        const result = validateRawRow(raw.ean, raw.naam, raw.kleur, raw.maat, rowLabel);
+
+        if (!result) return;
+        if (result.error) { errors.push(result.error); return; }
+        validRows.push(result.row);
+      });
+
+      return { validRows, errors };
+    }
+
+    function countNonBlankManualRows(rows) {
+      return rows.filter(raw => !isBlankRow(
+        String(raw.ean ?? '').trim().replace(/\s+/g, ''),
+        String(raw.naam ?? '').trim(),
+        String(raw.kleur ?? '').trim(),
+        String(raw.maat ?? '').trim()
+      )).length;
     }
 
     function findColumnKey(keys, aliases) {
@@ -565,19 +911,6 @@
       });
 
       errorsCard.hidden = false;
-    }
-
-    function resetUI() {
-      state.validRows = [];
-      state.errors = [];
-      generateBtn.disabled = true;
-      statusEl.textContent = '';
-      statusEl.className = 'hint';
-      summaryEl.hidden = true;
-      previewCard.hidden = true;
-      errorsCard.hidden = true;
-      previewTbody.innerHTML = '';
-      errorsTbody.innerHTML = '';
     }
 
     function escapeHtml(value) {
