@@ -241,6 +241,7 @@
     addManualRowBtn.addEventListener('click', handleAddManualRow);
     manualTbody.addEventListener('input', handleManualInput);
     manualTbody.addEventListener('click', handleManualRemoveClick);
+    manualTbody.addEventListener('paste', handleManualPaste);
     bulkAddBtn.addEventListener('click', handleBulkAdd);
 
     revalidateAll();
@@ -301,6 +302,40 @@
       const tr = btn.closest('tr');
       const index = Number(tr.dataset.index);
       state.manualRows.splice(index, 1);
+      renderManualTable();
+      revalidateAll();
+    }
+
+    function handleManualPaste(event) {
+      const input = event.target;
+      if (!input.classList.contains('manual-input')) {
+        return;
+      }
+
+      const text = event.clipboardData.getData('text/plain');
+      const lines = text.split(/\r\n|\r|\n/);
+      while (lines.length && lines[lines.length - 1] === '') {
+        lines.pop();
+      }
+
+      if (lines.length <= 1) {
+        return;
+      }
+
+      event.preventDefault();
+
+      const tr = input.closest('tr');
+      const startIndex = Number(tr.dataset.index);
+      const field = input.dataset.field;
+
+      lines.forEach((line, offset) => {
+        const rowIndex = startIndex + offset;
+        if (!state.manualRows[rowIndex]) {
+          state.manualRows[rowIndex] = { ean: '', naam: '', kleur: '', maat: '' };
+        }
+        state.manualRows[rowIndex][field] = line.trim();
+      });
+
       renderManualTable();
       revalidateAll();
     }
@@ -442,16 +477,35 @@
 
       return {
         widthMm, heightMm, marginX, contentW, topPadding, headerMaxWidth,
-        headerFontSize, eanFontSize, barcodeY, barcodeH
+        headerFontSize, eanFontSize, headerBlockHeight, barcodeY, barcodeH
       };
     }
 
+    function truncateTitleLines(doc, title, maxWidth, maxLines) {
+      const lines = doc.splitTextToSize(title, maxWidth);
+      if (lines.length <= maxLines) {
+        return lines;
+      }
+
+      const visibleLines = lines.slice(0, maxLines);
+      let lastLine = visibleLines[maxLines - 1].replace(/\s+$/, '');
+
+      while (lastLine.length > 0 && doc.getTextWidth(lastLine + '…') > maxWidth) {
+        lastLine = lastLine.slice(0, -1);
+      }
+
+      visibleLines[maxLines - 1] = lastLine + '…';
+      return visibleLines;
+    }
+
     function drawLabelPage(doc, row, layout) {
-      const title = `${row.naam} / ${row.kleur} / ${row.maat}`;
+      const title = [row.naam, row.kleur, row.maat].filter(Boolean).join(' / ');
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(layout.headerFontSize);
 
-      const titleLines = doc.splitTextToSize(title, layout.headerMaxWidth);
+      const lineHeightMm = layout.headerFontSize / doc.internal.scaleFactor * doc.getLineHeightFactor();
+      const maxHeaderLines = Math.max(1, Math.floor(layout.headerBlockHeight / lineHeightMm));
+      const titleLines = truncateTitleLines(doc, title, layout.headerMaxWidth, maxHeaderLines);
       doc.text(titleLines, layout.marginX, layout.topPadding, { baseline: 'top' });
 
       const canvas = document.createElement('canvas');
@@ -587,12 +641,7 @@
     }
 
     function buildUniqueFilename(row, usedNames) {
-      const naam = sanitizeFilenamePart(row.naam) || 'onbekend';
-      const kleur = sanitizeFilenamePart(row.kleur) || 'onbekend';
-      const maat = sanitizeFilenamePart(row.maat) || 'onbekend';
-      const ean = sanitizeFilenamePart(row.ean) || 'geen-ean';
-
-      const base = `${naam}-${kleur}-${maat}-${ean}`.slice(0, 150);
+      const base = sanitizeFilenamePart(row.ean) || 'geen-ean';
       let candidate = `${base}.pdf`;
       let counter = 2;
       while (usedNames.has(candidate.toLowerCase())) {
@@ -654,18 +703,6 @@
 
       if (!isValidEan13(ean)) {
         return { error: { row: rowLabel, error: `EAN '${ean}' heeft een onjuiste checkdigit.` } };
-      }
-
-      if (!naam) {
-        return { error: { row: rowLabel, error: 'Naam ontbreekt.' } };
-      }
-
-      if (!kleur) {
-        return { error: { row: rowLabel, error: 'Kleur ontbreekt.' } };
-      }
-
-      if (!maat) {
-        return { error: { row: rowLabel, error: 'Maat ontbreekt.' } };
       }
 
       return { row: { ean, naam, kleur, maat } };
