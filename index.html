@@ -306,6 +306,8 @@
       revalidateAll();
     }
 
+    const MANUAL_TABLE_FIELDS = ['ean', 'naam', 'kleur', 'maat'];
+
     function handleManualPaste(event) {
       const input = event.target;
       if (!input.classList.contains('manual-input')) {
@@ -318,22 +320,34 @@
         lines.pop();
       }
 
-      if (lines.length <= 1) {
+      if (!lines.length) {
+        return;
+      }
+
+      const rows = lines.map(line => line.split('\t'));
+      const isSingleCell = rows.length === 1 && rows[0].length === 1;
+      if (isSingleCell) {
         return;
       }
 
       event.preventDefault();
 
       const tr = input.closest('tr');
-      const startIndex = Number(tr.dataset.index);
-      const field = input.dataset.field;
+      const startRowIndex = Number(tr.dataset.index);
+      const startFieldIndex = MANUAL_TABLE_FIELDS.indexOf(input.dataset.field);
 
-      lines.forEach((line, offset) => {
-        const rowIndex = startIndex + offset;
+      rows.forEach((cells, rowOffset) => {
+        const rowIndex = startRowIndex + rowOffset;
         if (!state.manualRows[rowIndex]) {
           state.manualRows[rowIndex] = { ean: '', naam: '', kleur: '', maat: '' };
         }
-        state.manualRows[rowIndex][field] = line.trim();
+
+        cells.forEach((cell, colOffset) => {
+          const targetField = MANUAL_TABLE_FIELDS[startFieldIndex + colOffset];
+          if (targetField) {
+            state.manualRows[rowIndex][targetField] = cell.trim();
+          }
+        });
       });
 
       renderManualTable();
