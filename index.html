@@ -655,7 +655,12 @@
     }
 
     function buildUniqueFilename(row, usedNames) {
-      const base = sanitizeFilenamePart(row.ean) || 'geen-ean';
+      const ean = sanitizeFilenamePart(row.ean) || 'geen-ean';
+      const naam = sanitizeFilenamePart(row.naam) || 'onbekend';
+      const kleur = sanitizeFilenamePart(row.kleur) || 'onbekend';
+      const maat = sanitizeFilenamePart(row.maat) || 'onbekend';
+
+      const base = `${ean}-${naam}-${kleur}-${maat}`.slice(0, 150);
       let candidate = `${base}.pdf`;
       let counter = 2;
       while (usedNames.has(candidate.toLowerCase())) {
